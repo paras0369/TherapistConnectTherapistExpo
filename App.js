@@ -193,12 +193,12 @@ function AppNavigator() {
         <Stack.Screen
           name="TherapistLogin"
           component={TherapistLoginScreen}
-          options={{ title: "Therapist Login", headerShown: false }}
+          options={{ headerShown: false }}
         />
         <Stack.Screen
           name="TherapistDashboard"
           component={TherapistDashboard}
-          options={{ title: "Therapist Dashboard", headerShown: false }}
+          options={{ headerShown: false }}
         />
         <Stack.Screen
           name="Call"
