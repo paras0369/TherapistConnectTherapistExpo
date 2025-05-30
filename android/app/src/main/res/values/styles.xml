@@ -1,0 +1,17 @@
+<!-- In android/app/src/main/res/values/styles.xml (or themes.xml) -->
+<resources>
+    <!-- Base application theme. -->
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <!-- Customize your theme here. -->
+    </style>
+
+    <!-- SplashScreen theme -->
+    <!-- The name "Theme.App.SplashScreen" should exactly match what's in your AndroidManifest -->
+    <style name="Theme.App.SplashScreen" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splashscreen_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splashscreen_image</item>
+        <item name="windowSplashScreenAnimationDuration">200</item>
+        <item name="postSplashScreenTheme">@style/AppTheme</item>
+        <!-- You can also use Theme.AppCompat.DayNight.NoActionBar or your app's main theme for postSplashScreenTheme -->
+    </style>
+</resources>
