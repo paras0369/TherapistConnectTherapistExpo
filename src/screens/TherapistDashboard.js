@@ -1,4 +1,4 @@
-// src/screens/TherapistDashboard.js
+// src/screens/TherapistDashboard.js - Fixed implementation
 import React, { useEffect, useState, useCallback } from "react";
 import {
   View,
@@ -22,8 +22,14 @@ import {
   updateTherapistAvailability,
 } from "../store/authSlice";
 import api from "../services/api";
-import socketService from "../services/socket";
+import ZegoCloudService from "../services/zegoCloudService";
 import { FirebaseService } from "../services/firebase";
+import socketService from "../services/socket";
+import {
+  CALL_TYPES,
+  CALL_PRICING,
+  validateZegoConfig,
+} from "../config/zegoConfig";
 import LinearGradient from "react-native-linear-gradient";
 
 const { width } = Dimensions.get("window");
@@ -35,6 +41,7 @@ export default function TherapistDashboard({ navigation }) {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [callHistory, setCallHistory] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [zegoConfigValid, setZegoConfigValid] = useState(false);
   const [todayStats, setTodayStats] = useState({
     callsToday: 0,
     earningsToday: 0,
@@ -48,15 +55,62 @@ export default function TherapistDashboard({ navigation }) {
   const { therapist } = useSelector((state) => state.auth);
   const dispatch = useDispatch();
 
+  // Check ZegoCloud configuration on mount
+  useEffect(() => {
+    const config = validateZegoConfig();
+    setZegoConfigValid(config.isValid);
+
+    if (!config.isValid) {
+      console.warn("ZegoCloud configuration issues:", config.errors);
+      Alert.alert(
+        "Configuration Error",
+        "Call functionality requires proper ZegoCloud setup. Please contact support.",
+        [{ text: "OK" }]
+      );
+    }
+  }, []);
+
   // Initialize Firebase and notification listeners
   useEffect(() => {
     if (therapist) {
-      initializeFirebaseForTherapist();
+      initializeFirebaseForTherapist().catch((error) => {
+        console.error("Failed to initialize Firebase:", error);
+      });
+      // Initialize and connect socket
+      const socket = socketService.connect();
+      socket.on("connect", () => {
+        console.log("Therapist socket connected:", socket.id);
+        socketService.emit("therapist-connect", {
+          therapistId: therapist.id,
+          therapistInfo: { name: therapist.name, email: therapist.email }, // Add therapist info if needed
+        });
+      });
+
+      socket.on("disconnect", () => {
+        console.log("Therapist socket disconnected");
+      });
+
+      socket.on("connect_error", (error) => {
+        console.error("Therapist socket connection error:", error);
+      });
     }
+
+    return () => {
+      // Cleanup Firebase listeners
+      try {
+        FirebaseService.cleanup?.();
+      } catch (error) {
+        console.error("Error during Firebase cleanup:", error);
+      }
+      // Disconnect socket
+      socketService.disconnect();
+    };
   }, [therapist]);
 
   const initializeFirebaseForTherapist = async () => {
     try {
+      console.log("Initializing Firebase for therapist:", therapist.id);
+
       // Get FCM token and update on server
       const fcmToken = await FirebaseService.getFCMToken();
       if (fcmToken) {
@@ -65,7 +119,9 @@ export default function TherapistDashboard({ navigation }) {
           userType: "therapist",
           userId: therapist.id,
         });
-        console.log("Therapist FCM token updated");
+        console.log("Therapist FCM token updated successfully");
+      } else {
+        console.warn("Failed to get FCM token");
       }
 
       // Setup notification listeners for calls
@@ -75,87 +131,81 @@ export default function TherapistDashboard({ navigation }) {
 
       // Subscribe to therapist-specific topic
       await FirebaseService.subscribeToTopic(`therapist_${therapist.id}`);
+      console.log("Subscribed to therapist topic successfully");
     } catch (error) {
       console.error("Firebase initialization error for therapist:", error);
+      throw error; // Re-throw to be caught by the caller
     }
   };
 
+  // ONLY Firebase notifications handle incoming calls
   const handleFirebaseCallNotification = (notificationData) => {
-    console.log("Firebase call notification received:", notificationData);
+    // console.log("Firebase call notification received:", notificationData); // Already logged by FirebaseService
 
-    if (notificationData.type === "incoming_call") {
-      // Show incoming call modal
-      setIncomingCall({
-        userId: notificationData.userId,
-        userName: notificationData.userName,
-        roomId: notificationData.roomId,
-        callId: notificationData.callId,
-      });
-      setShowCallModal(true);
+    try {
+      if (notificationData.type === "incoming_call") {
+        // Validate essential notification data
+        if (!notificationData.callId) {
+          console.error(
+            "Invalid notification data - missing callId:",
+            notificationData
+          );
+          return;
+        }
+
+        // Ensure zegoCallId is always taken from the notification
+        const zegoCallId = notificationData.zegoCallId;
+        if (!zegoCallId) {
+          console.error("zegoCallId missing from notification, cannot proceed with call");
+          return; // Crucial: Do not proceed if zegoCallId is missing
+        }
+
+        // Enhanced incoming call data with call type
+        setIncomingCall({
+          userId: notificationData.userId,
+          userName: notificationData.userName || "User",
+          roomId: notificationData.roomId,
+          callId: notificationData.callId,
+          zegoCallId: zegoCallId,
+          callType: notificationData.callType || CALL_TYPES.VOICE,
+        });
+        setShowCallModal(true);
+      }
+    } catch (error) {
+      console.error("Error handling Firebase call notification:", error);
     }
   };
 
   // Refresh data when screen comes into focus
   useFocusEffect(
     useCallback(() => {
-      console.log("Therapist dashboard focused, refreshing data...");
-      fetchAllData();
+      fetchAllData().catch((error) => {
+        console.error("Error refreshing data on focus:", error);
+      });
     }, [])
   );
 
   useEffect(() => {
     if (therapist) {
       setIsAvailable(therapist.isAvailable);
-      fetchAllData();
-
-      // Connect socket
-      const socket = socketService.connect();
-
-      // FIXED: Properly connect therapist with their ID
-      console.log("🔗 Connecting therapist to socket:", therapist.id);
-      socketService.emit("therapist-connect", {
-        therapistId: therapist.id,
-        therapistInfo: {
-          name: therapist.name,
-          email: therapist.email,
-          isAvailable: therapist.isAvailable,
-        },
-      });
-
-      // Listen for connection confirmation
-      socketService.on("connection-confirmed", (data) => {
-        console.log("✅ Therapist socket connection confirmed:", data);
-      });
-
-      // Listen for incoming calls (backup to Firebase)
-      socketService.on("incoming-call", (data) => {
-        console.log("📞 Socket incoming call received:", data);
-        setIncomingCall(data);
-        setShowCallModal(true);
-      });
-
-      // Debug connection
-      socketService.emit("debug-connections");
-      socketService.on("debug-info", (data) => {
-        console.log("🔍 Therapist debug info:", data);
+      fetchAllData().catch((error) => {
+        console.error("Error fetching initial data:", error);
       });
 
       // Auto-refresh stats every 60 seconds when on dashboard tab
       const autoRefreshInterval = setInterval(() => {
         if (activeTab === "dashboard") {
-          fetchStats(false); // Silent refresh
+          fetchStats(false).catch((error) => {
+            console.error("Error during auto-refresh:", error);
+          });
         }
       }, 60000);
 
       return () => {
-        socketService.off("incoming-call");
-        socketService.off("connection-confirmed");
-        socketService.off("debug-info");
-        socketService.disconnect();
         clearInterval(autoRefreshInterval);
       };
     }
-  }, [therapist]);
+  }, [therapist, activeTab]);
 
   const fetchAllData = async () => {
     setRefreshing(true);
@@ -205,179 +255,166 @@ export default function TherapistDashboard({ navigation }) {
   };
 
   const toggleAvailability = async () => {
+    if (!zegoConfigValid) {
+      Alert.alert(
+        "Service Unavailable",
+        "Call functionality is temporarily unavailable. Cannot change availability status.",
+        [{ text: "OK" }]
+      );
+      return;
+    }
+
     try {
-      const response = await api.put("/therapist/availability", {
+      // Notify backend of availability change via socket
+      socketService.emit("therapist-availability-change", {
+        therapistId: therapist.id,
         isAvailable: !isAvailable,
       });
-      setIsAvailable(response.data.therapist.isAvailable);
-      dispatch(
-        updateTherapistAvailability(response.data.therapist.isAvailable)
-      );
+
+      // Optimistic update
+      setIsAvailable((prev) => !prev);
+
+      // No need to call API here, backend will handle it based on socket event
     } catch (error) {
-      Alert.alert("Error", "Failed to update availability");
+      console.error("Error toggling availability:", error);
+      Alert.alert(
+        "Error",
+        "Failed to update availability. Please try again."
+      );
+      setIsAvailable(therapist.isAvailable); // Revert on error
     }
   };
 
   const onRefresh = useCallback(() => {
-    fetchAllData();
+    fetchAllData().catch((error) => {
+      console.error("Error during refresh:", error);
+    });
   }, []);
 
   const handleTabChange = (tab) => {
     setActiveTab(tab);
     if (tab === "history") {
-      fetchCallHistory(false);
+      fetchCallHistory(false).catch((error) => {
+        console.error("Error fetching call history:", error);
+      });
     } else if (tab === "dashboard") {
-      fetchStats(false);
+      fetchStats(false).catch((error) => {
+        console.error("Error fetching stats:", error);
+      });
     }
   };
 
-  // src/screens/TherapistDashboard.js - Fixed acceptCall function
+  const handleCallAction = async (actionType) => {
+    if (!incomingCall) return;
 
-  const acceptCall = async () => {
+    const { callId, userId, roomId, zegoCallId, callType } = incomingCall;
+
     setShowCallModal(false);
-    try {
-      console.log("Accepting call:", incomingCall);
-
-      let callId = incomingCall.callId;
-
-      // If callId is not provided, extract from roomId
-      if (!callId && incomingCall.roomId) {
-        callId = incomingCall.roomId.split("-")[1];
-      }
-
-      // Update call status on server first
-      if (callId) {
-        try {
-          await api.post(`/call/answer/${callId}`);
-          console.log("Call answered on server");
-        } catch (apiError) {
-          console.warn("Failed to update call status on server:", apiError);
-          // Continue anyway - the call might still work
-        }
-      }
-
-      // Join the room BEFORE sending acceptance notification
-      console.log("Joining room:", incomingCall.roomId);
-      socketService.emit("join-room", incomingCall.roomId);
-
-      // Send call acceptance notification to user
-      console.log("Sending call-accepted event to user:", incomingCall.userId);
-      socketService.emit("call-accepted", {
-        userId: incomingCall.userId,
-        therapistId: therapist.id,
-        roomId: incomingCall.roomId,
-        callId: callId,
-      });
-
-      console.log("Navigating to call screen");
-
-      // Navigate to call screen
-      navigation.navigate("Call", {
-        roomId: incomingCall.roomId,
-        userId: incomingCall.userId,
-        isInitiator: false, // Therapist is not the initiator
-      });
-
-      // Clear incoming call state
-      setIncomingCall(null);
-    } catch (error) {
-      console.error("Error accepting call:", error);
-      Alert.alert("Error", "Failed to accept call");
-      setIncomingCall(null);
-    }
-  };
-
-  const rejectCall = () => {
-    setShowCallModal(false);
-    socketService.emit("call-rejected", {
-      userId: incomingCall.userId,
-      therapistId: therapist.id,
-    });
     setIncomingCall(null);
+
+    try {
+      if (actionType === "accept") {
+        // Notify backend via socket that call is accepted
+        socketService.emit("call-accepted", { callId, therapistId: therapist.id, userId, roomId });
+
+        // Join ZegoCloud room
+        await ZegoCloudService.joinRoom(
+          roomId,
+          therapist.id,
+          therapist.name,
+          true,
+          callType
+        );
+
+        // Navigate to the call screen (ZegoCallScreen)
+        navigation.navigate("ZegoCallScreen", {
+          roomId,
+          callId,
+          userId,
+          userName: incomingCall.userName,
+          isCaller: false, // Therapist is the receiver
+          zegoCallId, // Pass the zegoCallId to the call screen
+          callType,
+        });
+      } else if (actionType === "reject") {
+        // Notify backend via socket that call is rejected
+        socketService.emit("call-rejected", {
+          callId,
+          therapistId: therapist.id,
+          userId,
+          reason: "Therapist rejected the call",
+        });
+        Alert.alert("Call Rejected", "You have rejected the call.");
+      }
+    } catch (error) {
+      console.error(`Error during call ${actionType}:`, error);
+      Alert.alert(
+        "Call Error",
+        `Failed to ${actionType} call. Please try again.`
+      );
+    }
   };
 
   const handleLogout = async () => {
-    Alert.alert("Logout", "Are you sure you want to logout?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Logout",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            // Unsubscribe from Firebase topics
-            await FirebaseService.unsubscribeFromTopic(
-              `therapist_${therapist.id}`
-            );
-          } catch (error) {
-            console.error("Error unsubscribing from Firebase topics:", error);
-          }
-
-          dispatch(logout());
-          navigation.reset({
-            index: 0,
-            routes: [{ name: "TherapistLogin" }],
-          });
-        },
-      },
-    ]);
+    try {
+      await api.post("/auth/logout");
+      dispatch(logout());
+      navigation.replace("Login");
+    } catch (error) {
+      console.error("Error logging out:", error);
+      Alert.alert("Logout Error", "Failed to log out. Please try again.");
+    }
   };
 
   const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return (
-      date.toLocaleDateString() +
-      " " +
-      date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    );
+    if (!dateString) return "N/A";
+    const options = { year: "numeric", month: "short", day: "numeric" };
+    return new Date(dateString).toLocaleDateString(undefined, options);
   };
 
   const formatDuration = (minutes) => {
-    const hrs = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-    return hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+    if (minutes === null || minutes === undefined) return "N/A";
+    if (minutes < 1) return "< 1 min";
+    return `${Math.round(minutes)} min`;
   };
 
   const StatCard = ({ title, value, subtitle, icon, color }) => (
-    <View style={[styles.statCard, { borderLeftColor: color }]}>
-      <View style={styles.statHeader}>
-        <Text style={styles.statIcon}>{icon}</Text>
-        <Text style={styles.statTitle}>{title}</Text>
-      </View>
-      <Text style={[styles.statValue, { color }]}>{value}</Text>
+    <View style={[styles.statCard, { backgroundColor: color || "#fff" }]}>
+      <Text>{icon}</Text>
+      <Text style={styles.statTitle}>{title}</Text>
+      <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statSubtitle}>{subtitle}</Text>
     </View>
   );
 
   const renderCallHistoryItem = ({ item }) => (
-    <View style={styles.historyCard}>
-      <View style={styles.historyHeader}>
-        <View style={styles.historyAvatar}>
-          <Text style={styles.historyAvatarText}>U</Text>
-        </View>
-        <View style={styles.historyInfo}>
-          <Text style={styles.historyUserName}>
-            User ({item.userId?.phoneNumber?.slice(-4) || "Unknown"})
-          </Text>
-          <Text style={styles.historyDate}>{formatDate(item.startTime)}</Text>
-        </View>
-        <View style={styles.historyMeta}>
-          <Text style={styles.historyDuration}>
-            {formatDuration(item.durationMinutes)}
-          </Text>
-          <Text style={styles.historyEarnings}>
-            +{item.therapistEarningsCoins} coins
-          </Text>
-        </View>
-      </View>
-      <View style={styles.historyStatus}>
-        <View
-          style={[
-            styles.statusBadge,
-            { backgroundColor: getStatusColor(item.status) },
-          ]}
+    <View style={styles.callHistoryItem}>
+      <View style={styles.callHistoryHeader}>
+        <Text style={styles.callHistoryType}>
+          {item.callType === CALL_TYPES.VIDEO ? "Video Call" : "Voice Call"}
+        </Text>
+        <Text
+          style={[styles.callHistoryStatus, { color: getStatusColor(item.status) }]}
         >
-          <Text style={styles.statusText}>{getStatusText(item.status)}</Text>
-        </View>
+          {getStatusText(item.status)}
+        </Text>
+      </View>
+      <View style={styles.callHistoryInfo}>
+        <Text style={styles.callHistoryUserName}>
+          User ({item.userId?.phoneNumber?.slice(-4) || "Unknown"})
+        </Text>
+        <Text style={styles.callHistoryDate}>{formatDate(item.startTime)}</Text>
+        <Text style={styles.callHistoryCallType}>
+          {item.callType === CALL_TYPES.VIDEO ? "📹 Video" : "🎤 Voice"} Call
+        </Text>
+      </View>
+      <View style={styles.callHistoryMeta}>
+        <Text style={styles.callHistoryDuration}>
+          {formatDuration(item.durationMinutes)}
+        </Text>
+        <Text style={styles.callHistoryEarnings}>
+          +{item.therapistEarningsCoins} coins
+        </Text>
       </View>
     </View>
   );
@@ -443,16 +480,46 @@ export default function TherapistDashboard({ navigation }) {
                     ? "You can receive calls from users"
                     : "You are not visible to users"}
                 </Text>
+                {!zegoConfigValid && (
+                  <Text style={styles.configWarning}>
+                    ⚠️ Call service unavailable
+                  </Text>
+                )}
               </View>
             </View>
             <Switch
-              value={isAvailable}
+              value={isAvailable && zegoConfigValid}
               onValueChange={toggleAvailability}
               trackColor={{ false: "#767577", true: "rgba(255,255,255,0.3)" }}
               thumbColor="#fff"
+              disabled={!zegoConfigValid}
             />
           </View>
         </LinearGradient>
+      </View>
+
+      {/* Call Type Pricing Information */}
+      <View style={styles.pricingCard}>
+        <Text style={styles.pricingTitle}>💰 Call Rates</Text>
+        <View style={styles.pricingRow}>
+          <View style={styles.pricingItem}>
+            <Text style={styles.pricingIcon}>🎤</Text>
+            <Text style={styles.pricingType}>Voice Calls</Text>
+            <Text style={styles.pricingEarning}>
+              Earn {CALL_PRICING[CALL_TYPES.VOICE].therapistEarningsPerMinute}{" "}
+              coins/min
+            </Text>
+          </View>
+          <View style={styles.pricingDivider} />
+          <View style={styles.pricingItem}>
+            <Text style={styles.pricingIcon}>📹</Text>
+            <Text style={styles.pricingType}>Video Calls</Text>
+            <Text style={styles.pricingEarning}>
+              Earn {CALL_PRICING[CALL_TYPES.VIDEO].therapistEarningsPerMinute}{" "}
+              coins/min
+            </Text>
+          </View>
+        </View>
       </View>
 
       {/* Today's Stats */}
@@ -563,6 +630,13 @@ export default function TherapistDashboard({ navigation }) {
                 {therapist?.totalEarningsCoins || 0} coins
               </Text>
             </View>
+            {!zegoConfigValid && (
+              <View style={styles.serviceWarning}>
+                <Text style={styles.serviceWarningText}>
+                  ⚠️ Call service unavailable
+                </Text>
+              </View>
+            )}
           </View>
           <TouchableOpacity onPress={handleLogout} style={styles.logoutButton}>
             <Text style={styles.logoutIcon}>🚪</Text>
@@ -607,20 +681,34 @@ export default function TherapistDashboard({ navigation }) {
         <CallHistoryContent />
       )}
 
-      {/* Incoming Call Modal */}
+      {/* Enhanced Incoming Call Modal - ONLY source of incoming calls */}
       <Modal
         visible={showCallModal}
         transparent
         animationType="slide"
-        onRequestClose={rejectCall}
+        onRequestClose={() => {
+          setShowCallModal(false);
+          setIncomingCall(null);
+        }}
       >
         <View style={styles.modalContainer}>
           <LinearGradient
-            colors={["#4CAF50", "#45a049"]}
+            colors={
+              incomingCall?.callType === CALL_TYPES.VIDEO
+                ? ["#2196F3", "#1976D2"]
+                : ["#4CAF50", "#45a049"]
+            }
             style={styles.callModalContent}
           >
             <View style={styles.callModalHeader}>
-              <Text style={styles.callModalTitle}>📞 Incoming Call</Text>
+              <Text style={styles.callModalTitle}>
+                {incomingCall?.callType === CALL_TYPES.VIDEO ? "📹" : "📞"}{" "}
+                Incoming{" "}
+                {incomingCall?.callType === CALL_TYPES.VIDEO
+                  ? "Video"
+                  : "Voice"}{" "}
+                Call
+              </Text>
               <Text style={styles.callModalSubtitle}>
                 {incomingCall?.userName || "User"} is calling...
               </Text>
@@ -633,13 +721,26 @@ export default function TherapistDashboard({ navigation }) {
               <Text style={styles.callerName}>
                 {incomingCall?.userName || "User"}
               </Text>
-              <Text style={styles.roomInfo}>Room: {incomingCall?.roomId}</Text>
+              <Text style={styles.callTypeInfo}>
+                {incomingCall?.callType === CALL_TYPES.VIDEO
+                  ? "Video"
+                  : "Voice"}{" "}
+                Call
+              </Text>
+              <Text style={styles.earningInfo}>
+                Earn{" "}
+                {
+                  CALL_PRICING[incomingCall?.callType || CALL_TYPES.VOICE]
+                    .therapistEarningsPerMinute
+                }{" "}
+                coins/min
+              </Text>
             </View>
 
             <View style={styles.callActions}>
               <TouchableOpacity
                 style={styles.rejectButton}
-                onPress={rejectCall}
+                onPress={() => handleCallAction("reject")}
               >
                 <Text style={styles.rejectIcon}>📞</Text>
                 <Text style={styles.rejectText}>Decline</Text>
@@ -647,12 +748,19 @@ export default function TherapistDashboard({ navigation }) {
 
               <TouchableOpacity
                 style={styles.acceptButton}
-                onPress={acceptCall}
+                onPress={() => handleCallAction("accept")}
+                disabled={!zegoConfigValid}
               >
                 <Text style={styles.acceptIcon}>📞</Text>
                 <Text style={styles.acceptText}>Accept</Text>
               </TouchableOpacity>
             </View>
+
+            {!zegoConfigValid && (
+              <Text style={styles.configErrorText}>
+                Call service temporarily unavailable
+              </Text>
+            )}
           </LinearGradient>
         </View>
       </Modal>
@@ -710,6 +818,14 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 14,
   },
+  serviceWarning: {
+    marginTop: 4,
+  },
+  serviceWarningText: {
+    color: "#ffeb3b",
+    fontSize: 12,
+    fontWeight: "500",
+  },
   logoutButton: {
     padding: 10,
   },
@@ -749,30 +865,6 @@ const styles = StyleSheet.create({
     flex: 1,
     marginTop: 20,
   },
-  availabilityCard: {
-    marginHorizontal: 20,
-    marginBottom: 25,
-    borderRadius: 15,
-    overflow: "hidden",
-    elevation: 5,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-  },
-  availabilityGradient: {
-    padding: 20,
-  },
-  availabilityContent: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  availabilityLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    flex: 1,
-  },
   availabilityIcon: {
     fontSize: 24,
     marginRight: 15,
@@ -786,6 +878,59 @@ const styles = StyleSheet.create({
   availabilitySubtitle: {
     color: "rgba(255, 255, 255, 0.8)",
     fontSize: 14,
+  },
+  configWarning: {
+    color: "#ffeb3b",
+    fontSize: 12,
+    fontWeight: "500",
+    marginTop: 2,
+  },
+  pricingCard: {
+    backgroundColor: "#fff",
+    marginHorizontal: 20,
+    marginBottom: 25,
+    borderRadius: 15,
+    padding: 20,
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  pricingTitle: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 15,
+    textAlign: "center",
+  },
+  pricingRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  pricingItem: {
+    flex: 1,
+    alignItems: "center",
+  },
+  pricingIcon: {
+    fontSize: 24,
+    marginBottom: 8,
+  },
+  pricingType: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 4,
+  },
+  pricingEarning: {
+    fontSize: 12,
+    color: "#4CAF50",
+    fontWeight: "500",
+  },
+  pricingDivider: {
+    width: 1,
+    backgroundColor: "#e9ecef",
+    marginHorizontal: 15,
   },
   sectionTitle: {
     fontSize: 18,
@@ -872,7 +1017,7 @@ const styles = StyleSheet.create({
     paddingTop: 20,
     paddingBottom: 20,
   },
-  historyCard: {
+  callHistoryItem: {
     backgroundColor: "#fff",
     borderRadius: 15,
     padding: 20,
@@ -883,84 +1028,53 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 8,
   },
-  historyHeader: {
+  callHistoryHeader: {
     flexDirection: "row",
     alignItems: "center",
     marginBottom: 10,
   },
-  historyAvatar: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: "#667eea",
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 15,
-  },
-  historyAvatarText: {
-    color: "#fff",
-    fontSize: 18,
+  callHistoryType: {
+    fontSize: 16,
     fontWeight: "bold",
+    color: "#333",
   },
-  historyInfo: {
+  callHistoryStatus: {
+    fontSize: 14,
+    color: "#4CAF50",
+    fontWeight: "500",
+  },
+  callHistoryInfo: {
     flex: 1,
   },
-  historyUserName: {
+  callHistoryUserName: {
     fontSize: 16,
     fontWeight: "bold",
     color: "#333",
     marginBottom: 4,
   },
-  historyDate: {
+  callHistoryDate: {
     fontSize: 12,
     color: "#666",
+    marginBottom: 2,
   },
-  historyMeta: {
+  callHistoryCallType: {
+    fontSize: 12,
+    color: "#888",
+    fontWeight: "500",
+  },
+  callHistoryMeta: {
     alignItems: "flex-end",
   },
-  historyDuration: {
+  callHistoryDuration: {
     fontSize: 14,
     fontWeight: "bold",
     color: "#333",
     marginBottom: 4,
   },
-  historyEarnings: {
+  callHistoryEarnings: {
     fontSize: 12,
     color: "#4CAF50",
     fontWeight: "500",
-  },
-  historyStatus: {
-    alignItems: "flex-start",
-  },
-  statusBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 20,
-  },
-  statusText: {
-    color: "#fff",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  emptyContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 60,
-  },
-  emptyIcon: {
-    fontSize: 60,
-    marginBottom: 15,
-  },
-  emptyText: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#333",
-    marginBottom: 8,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    color: "#666",
-    textAlign: "center",
   },
   modalContainer: {
     flex: 1,
@@ -1012,14 +1126,21 @@ const styles = StyleSheet.create({
     color: "#fff",
     marginBottom: 5,
   },
-  roomInfo: {
-    fontSize: 12,
-    color: "rgba(255, 255, 255, 0.6)",
+  callTypeInfo: {
+    fontSize: 16,
+    color: "rgba(255, 255, 255, 0.8)",
+    marginBottom: 5,
+  },
+  earningInfo: {
+    fontSize: 14,
+    color: "rgba(255, 255, 255, 0.9)",
+    fontWeight: "500",
   },
   callActions: {
     flexDirection: "row",
     justifyContent: "space-around",
     width: "100%",
+    marginBottom: 20,
   },
   rejectButton: {
     backgroundColor: "#f44336",
@@ -1055,5 +1176,191 @@ const styles = StyleSheet.create({
     color: "#4CAF50",
     fontWeight: "bold",
     fontSize: 14,
+  },
+  configErrorText: {
+    color: "#ffeb3b",
+    fontSize: 12,
+    textAlign: "center",
+    fontWeight: "500",
+  },
+  availabilityGradient: {
+    padding: 20,
+  },
+  availabilityContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  availabilityLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    flex: 1,
+  },
+  availabilityIcon: {
+    fontSize: 24,
+    marginRight: 15,
+  },
+  availabilityTitle: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "bold",
+    marginBottom: 4,
+  },
+  availabilitySubtitle: {
+    color: "rgba(255, 255, 255, 0.8)",
+    fontSize: 14,
+  },
+  configWarning: {
+    color: "#ffeb3b",
+    fontSize: 12,
+    fontWeight: "500",
+    marginTop: 2,
+  },
+  pricingCard: {
+    backgroundColor: "#fff",
+    marginHorizontal: 20,
+    marginBottom: 25,
+    borderRadius: 15,
+    padding: 20,
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  pricingTitle: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 15,
+    textAlign: "center",
+  },
+  pricingRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  pricingItem: {
+    flex: 1,
+    alignItems: "center",
+  },
+  pricingIcon: {
+    fontSize: 24,
+    marginBottom: 8,
+  },
+  pricingType: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 4,
+  },
+  pricingEarning: {
+    fontSize: 12,
+    color: "#4CAF50",
+    fontWeight: "500",
+  },
+  pricingDivider: {
+    width: 1,
+    backgroundColor: "#e9ecef",
+    marginHorizontal: 15,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+    marginHorizontal: 20,
+    marginBottom: 15,
+  },
+  statsRow: {
+    flexDirection: "row",
+    marginHorizontal: 20,
+    marginBottom: 15,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: "#fff",
+    borderRadius: 15,
+    padding: 20,
+    marginHorizontal: 5,
+    borderLeftWidth: 4,
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  statHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  statIcon: {
+    fontSize: 16,
+    marginRight: 8,
+  },
+  statTitle: {
+    fontSize: 14,
+    color: "#666",
+    fontWeight: "500",
+  },
+  statValue: {
+    fontSize: 24,
+    fontWeight: "bold",
+    marginBottom: 5,
+  },
+  statSubtitle: {
+    fontSize: 12,
+    color: "#999",
+  },
+  weeklyCard: {
+    backgroundColor: "#fff",
+    marginHorizontal: 20,
+    borderRadius: 15,
+    padding: 20,
+    flexDirection: "row",
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    marginBottom: 20,
+  },
+  weeklyItem: {
+    flex: 1,
+    alignItems: "center",
+  },
+  weeklyLabel: {
+    fontSize: 14,
+    color: "#666",
+    marginBottom: 8,
+  },
+  weeklyValue: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#333",
+  },
+  weeklyDivider: {
+    width: 1,
+    backgroundColor: "#e9ecef",
+    marginHorizontal: 15,
+  },
+  emptyContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 60,
+  },
+  emptyIcon: {
+    fontSize: 60,
+    marginBottom: 15,
+  },
+  emptyText: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#333",
+    marginBottom: 8,
+  },
+  emptySubtext: {
+    fontSize: 14,
+    color: "#666",
+    textAlign: "center",
   },
 });

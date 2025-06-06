@@ -5,6 +5,7 @@ import { createStackNavigator } from "@react-navigation/stack";
 import { Provider } from "react-redux";
 import { store } from "./src/store";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import ZegoCallScreen from "./src/screens/ZegoCallScreen";
 import {
   View,
   ActivityIndicator,
@@ -200,11 +201,7 @@ function AppNavigator() {
           component={TherapistDashboard}
           options={{ headerShown: false }}
         />
-        <Stack.Screen
-          name="Call"
-          component={CallScreen}
-          options={{ headerShown: false }}
-        />
+        <Stack.Screen name="ZegoCallScreen" component={ZegoCallScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
