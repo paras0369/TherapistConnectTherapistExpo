@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { useDispatch, useSelector } from "react-redux";
 import { therapistLogin } from "../store/authSlice"; // Assuming path is correct
-import { FirebaseService } from "../services/firebase"; // Assuming path is correct
+// Assuming path is correct
 import LinearGradient from "react-native-linear-gradient";
 
 const { width, height } = Dimensions.get("window");
@@ -25,34 +25,9 @@ export default function TherapistLoginScreen({ navigation }) {
   const dispatch = useDispatch();
   const { loading } = useSelector((state) => state.auth);
 
-  useEffect(() => {
-    initializeFirebase();
-  }, []);
-
-  const initializeFirebase = async () => {
-    try {
-      const token = await FirebaseService.getFCMToken();
-      setFcmToken(token);
-      console.log("Therapist App - FCM Token obtained for Login:", token);
-    } catch (error) {
-      console.error(
-        "Therapist App - Error initializing Firebase on Login:",
-        error
-      );
-    }
-  };
-
   const handleLogin = async () => {
     if (!email || !password) {
       Alert.alert("Error", "Please enter email and password");
-      return;
-    }
-    if (!fcmToken) {
-      Alert.alert(
-        "Setup Incomplete",
-        "FCM token not yet available. Please wait a moment and try again."
-      );
-      // await initializeFirebase();
       return;
     }
 

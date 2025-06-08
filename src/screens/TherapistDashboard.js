@@ -22,8 +22,8 @@ import {
   updateTherapistAvailability,
 } from "../store/authSlice";
 import api from "../services/api";
-import ZegoCloudService from "../services/zegoCloudService";
-import { FirebaseService } from "../services/firebase";
+import unifiedZegoService from "../services/unifiedZegoService";
+
 import socketService from "../services/socket";
 import {
   CALL_TYPES,
@@ -69,112 +69,58 @@ export default function TherapistDashboard({ navigation }) {
       );
     }
   }, []);
-
-  // Initialize Firebase and notification listeners
   useEffect(() => {
     if (therapist) {
-      initializeFirebaseForTherapist().catch((error) => {
-        console.error("Failed to initialize Firebase:", error);
-      });
-      // Initialize and connect socket
+      // Initialize socket connection
       const socket = socketService.connect();
+
       socket.on("connect", () => {
         console.log("Therapist socket connected:", socket.id);
         socketService.emit("therapist-connect", {
           therapistId: therapist.id,
-          therapistInfo: { name: therapist.name, email: therapist.email }, // Add therapist info if needed
+          therapistInfo: { name: therapist.name, email: therapist.email },
         });
       });
 
-      socket.on("disconnect", () => {
-        console.log("Therapist socket disconnected");
+      // Listen for incoming calls via socket only
+      socketService.on("incoming-call", (data) => {
+        console.log("Incoming call via socket:", data);
+        handleIncomingCall(data);
       });
 
-      socket.on("connect_error", (error) => {
-        console.error("Therapist socket connection error:", error);
+      socketService.on("call-cancelled", (data) => {
+        console.log("Call cancelled:", data);
+        setShowCallModal(false);
+        setIncomingCall(null);
       });
+
+      socketService.on("call-timeout", (data) => {
+        console.log("Call timeout:", data);
+        setShowCallModal(false);
+        setIncomingCall(null);
+      });
+
+      return () => {
+        socketService.disconnect();
+      };
     }
-
-    return () => {
-      // Cleanup Firebase listeners
-      try {
-        FirebaseService.cleanup?.();
-      } catch (error) {
-        console.error("Error during Firebase cleanup:", error);
-      }
-      // Disconnect socket
-      socketService.disconnect();
-    };
   }, [therapist]);
 
-  const initializeFirebaseForTherapist = async () => {
-    try {
-      console.log("Initializing Firebase for therapist:", therapist.id);
-
-      // Get FCM token and update on server
-      const fcmToken = await FirebaseService.getFCMToken();
-      if (fcmToken) {
-        await api.post("/auth/update-fcm-token", {
-          fcmToken,
-          userType: "therapist",
-          userId: therapist.id,
-        });
-        console.log("Therapist FCM token updated successfully");
-      } else {
-        console.warn("Failed to get FCM token");
-      }
-
-      // Setup notification listeners for calls
-      FirebaseService.setupNotificationListeners(
-        handleFirebaseCallNotification
-      );
-
-      // Subscribe to therapist-specific topic
-      await FirebaseService.subscribeToTopic(`therapist_${therapist.id}`);
-      console.log("Subscribed to therapist topic successfully");
-    } catch (error) {
-      console.error("Firebase initialization error for therapist:", error);
-      throw error; // Re-throw to be caught by the caller
-    }
+  const handleIncomingCall = (callData) => {
+    setIncomingCall({
+      userId: callData.userId,
+      userName: callData.userName || "User",
+      roomId: callData.roomId,
+      callId: callData.callId,
+      zegoCallId: callData.zegoCallId,
+      callType: callData.callType || CALL_TYPES.VOICE,
+    });
+    setShowCallModal(true);
   };
+
+  // Initialize Firebase and notification listeners
 
   // ONLY Firebase notifications handle incoming calls
-  const handleFirebaseCallNotification = (notificationData) => {
-    // console.log("Firebase call notification received:", notificationData); // Already logged by FirebaseService
-
-    try {
-      if (notificationData.type === "incoming_call") {
-        // Validate essential notification data
-        if (!notificationData.callId) {
-          console.error(
-            "Invalid notification data - missing callId:",
-            notificationData
-          );
-          return;
-        }
-
-        // Ensure zegoCallId is always taken from the notification
-        const zegoCallId = notificationData.zegoCallId;
-        if (!zegoCallId) {
-          console.error("zegoCallId missing from notification, cannot proceed with call");
-          return; // Crucial: Do not proceed if zegoCallId is missing
-        }
-
-        // Enhanced incoming call data with call type
-        setIncomingCall({
-          userId: notificationData.userId,
-          userName: notificationData.userName || "User",
-          roomId: notificationData.roomId,
-          callId: notificationData.callId,
-          zegoCallId: zegoCallId,
-          callType: notificationData.callType || CALL_TYPES.VOICE,
-        });
-        setShowCallModal(true);
-      }
-    } catch (error) {
-      console.error("Error handling Firebase call notification:", error);
-    }
-  };
 
   // Refresh data when screen comes into focus
   useFocusEffect(
@@ -277,10 +223,7 @@ export default function TherapistDashboard({ navigation }) {
       // No need to call API here, backend will handle it based on socket event
     } catch (error) {
       console.error("Error toggling availability:", error);
-      Alert.alert(
-        "Error",
-        "Failed to update availability. Please try again."
-      );
+      Alert.alert("Error", "Failed to update availability. Please try again.");
       setIsAvailable(therapist.isAvailable); // Revert on error
     }
   };
@@ -307,36 +250,62 @@ export default function TherapistDashboard({ navigation }) {
   const handleCallAction = async (actionType) => {
     if (!incomingCall) return;
 
-    const { callId, userId, roomId, zegoCallId, callType } = incomingCall;
+    const { callId, userId, roomId, zegoCallId, callType, userName } =
+      incomingCall;
 
     setShowCallModal(false);
     setIncomingCall(null);
 
     try {
       if (actionType === "accept") {
-        // Notify backend via socket that call is accepted
-        socketService.emit("call-accepted", { callId, therapistId: therapist.id, userId, roomId });
+        console.log("Accepting call with data:", {
+          callId,
+          userId,
+          roomId,
+          zegoCallId,
+          callType,
+          userName,
+          therapist: therapist?.id,
+        });
 
-        // Join ZegoCloud room
-        await ZegoCloudService.joinRoom(
+        // Notify backend via socket that call is accepted
+        socketService.emit("call-accepted", {
+          callId,
+          therapistId: therapist.id,
+          userId,
+          roomId,
+        });
+
+        // Join ZegoCloud room using the unified service
+        const roomInfo = await unifiedZegoService.joinRoom(
           roomId,
           therapist.id,
           therapist.name,
-          true,
+          true, // isTherapist
           callType
         );
 
-        // Navigate to the call screen (ZegoCallScreen)
+        console.log("Successfully joined ZegoCloud room:", roomInfo);
+
+        // Navigate to the call screen
         navigation.navigate("ZegoCallScreen", {
           roomId,
           callId,
           userId,
-          userName: incomingCall.userName,
+          userName: userName || "User",
           isCaller: false, // Therapist is the receiver
-          zegoCallId, // Pass the zegoCallId to the call screen
+          zegoCallId,
           callType,
+          therapistId: therapist.id,
+          therapistName: therapist.name,
         });
       } else if (actionType === "reject") {
+        console.log("Rejecting call:", {
+          callId,
+          therapistId: therapist.id,
+          userId,
+        });
+
         // Notify backend via socket that call is rejected
         socketService.emit("call-rejected", {
           callId,
@@ -344,14 +313,19 @@ export default function TherapistDashboard({ navigation }) {
           userId,
           reason: "Therapist rejected the call",
         });
+
         Alert.alert("Call Rejected", "You have rejected the call.");
       }
     } catch (error) {
       console.error(`Error during call ${actionType}:`, error);
       Alert.alert(
         "Call Error",
-        `Failed to ${actionType} call. Please try again.`
+        `Failed to ${actionType} call: ${error.message}`
       );
+
+      // Reset the modal state on error
+      setShowCallModal(false);
+      setIncomingCall(null);
     }
   };
 
@@ -394,7 +368,10 @@ export default function TherapistDashboard({ navigation }) {
           {item.callType === CALL_TYPES.VIDEO ? "Video Call" : "Voice Call"}
         </Text>
         <Text
-          style={[styles.callHistoryStatus, { color: getStatusColor(item.status) }]}
+          style={[
+            styles.callHistoryStatus,
+            { color: getStatusColor(item.status) },
+          ]}
         >
           {getStatusText(item.status)}
         </Text>

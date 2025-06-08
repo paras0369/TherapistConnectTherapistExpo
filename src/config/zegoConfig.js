@@ -1,12 +1,30 @@
 // src/config/zegoConfig.js
 import { Platform } from "react-native";
+import Constants from "expo-constants";
 
-// ZegoCloud Configuration
-// Replace these with your actual ZegoCloud credentials from the console
-export const ZEGO_APP_ID = "1226411060";
+// Debug logging
+console.log("Constants.expoConfig:", Constants.expoConfig);
+console.log("Constants.expoConfig.extra:", Constants.expoConfig?.extra);
 
-export const ZEGO_APP_SIGN =
-  "b3b4353c9b8f988417b9b2c82525c753c2afd807b0414576ffe478fe9faff334";
+// Get ZEGO credentials with fallback and validation
+let rawAppId = Constants.expoConfig?.extra?.ZEGO_APP_ID;
+export const ZEGO_APP_ID =
+  typeof rawAppId === "string" ? parseInt(rawAppId, 10) : rawAppId;
+export const ZEGO_APP_SIGN = Constants.expoConfig?.extra?.ZEGO_APP_SIGN;
+
+// Debug the values
+console.log("ZEGO_APP_ID loaded:", ZEGO_APP_ID);
+console.log("ZEGO_APP_SIGN loaded:", ZEGO_APP_SIGN ? "Present" : "Missing");
+
+// Validate that we have valid credentials
+if (!ZEGO_APP_ID || !ZEGO_APP_SIGN) {
+  console.error("❌ ZEGO Configuration Error:");
+  console.error("ZEGO_APP_ID:", ZEGO_APP_ID);
+  console.error("ZEGO_APP_SIGN:", ZEGO_APP_SIGN ? "Present" : "Missing");
+  console.error(
+    "Make sure your .env file contains valid ZEGO_APP_ID and ZEGO_APP_SIGN"
+  );
+}
 
 // Call Types
 export const CALL_TYPES = {
@@ -44,14 +62,12 @@ export const CALL_PRICING = {
 // Platform-specific configurations
 export const PLATFORM_CONFIG = {
   android: {
-    // Android specific ZegoCloud settings
     enableHardwareEchoCancel: true,
     enableHardwareNoiseSuppress: true,
     enableAgc: true,
     enableDtx: false,
   },
   ios: {
-    // iOS specific ZegoCloud settings
     enableHardwareEchoCancel: true,
     enableHardwareNoiseSuppress: true,
     enableAgc: true,
@@ -64,22 +80,48 @@ export const getPlatformConfig = () => {
   return PLATFORM_CONFIG[Platform.OS] || PLATFORM_CONFIG.android;
 };
 
-// Validate configuration
+// Enhanced validation with detailed error reporting
 export const validateZegoConfig = () => {
   const errors = [];
 
-  if (!ZEGO_APP_ID || ZEGO_APP_ID === 1234567890) {
-    errors.push("ZEGO_APP_ID is not configured or using default value");
+  if (!ZEGO_APP_ID) {
+    errors.push("ZEGO_APP_ID is missing or null");
+  } else if (
+    typeof ZEGO_APP_ID !== "number" &&
+    isNaN(parseInt(ZEGO_APP_ID, 10))
+  ) {
+    errors.push("ZEGO_APP_ID should be a valid number");
+  } else if (
+    ZEGO_APP_ID === 1234567890 ||
+    parseInt(ZEGO_APP_ID, 10) === 1234567890
+  ) {
+    errors.push("ZEGO_APP_ID is using default/example value");
   }
 
-  if (!ZEGO_APP_SIGN || ZEGO_APP_SIGN.includes("your_")) {
-    errors.push("ZEGO_APP_SIGN is not configured or using default value");
+  if (!ZEGO_APP_SIGN) {
+    errors.push("ZEGO_APP_SIGN is missing or null");
+  } else if (typeof ZEGO_APP_SIGN !== "string") {
+    errors.push("ZEGO_APP_SIGN should be a string");
+  } else if (ZEGO_APP_SIGN.includes("your_") || ZEGO_APP_SIGN.length < 10) {
+    errors.push("ZEGO_APP_SIGN appears to be using default/example value");
   }
 
-  return {
+  const result = {
     isValid: errors.length === 0,
     errors,
+    config: {
+      appId: ZEGO_APP_ID,
+      appSign: ZEGO_APP_SIGN ? "Present" : "Missing",
+    },
   };
+
+  if (!result.isValid) {
+    console.error("❌ ZEGO Configuration Validation Failed:", result);
+  } else {
+    console.log("✅ ZEGO Configuration is valid");
+  }
+
+  return result;
 };
 
 // Quality settings for different network conditions
@@ -124,10 +166,10 @@ export const QUALITY_SETTINGS = {
 
 // Call timeout settings
 export const CALL_TIMEOUTS = {
-  INVITATION_TIMEOUT: 30000, // 30 seconds for call invitation
-  CONNECTION_TIMEOUT: 15000, // 15 seconds for connection establishment
-  RECONNECTION_TIMEOUT: 10000, // 10 seconds for reconnection attempts
-  MAX_RECONNECTION_ATTEMPTS: 3, // Maximum reconnection attempts
+  INVITATION_TIMEOUT: 30000,
+  CONNECTION_TIMEOUT: 15000,
+  RECONNECTION_TIMEOUT: 10000,
+  MAX_RECONNECTION_ATTEMPTS: 3,
 };
 
 // UI Configuration
@@ -145,28 +187,31 @@ export const UI_CONFIG = {
     backgroundColor: "#1e1e1e",
     showCallDuration: true,
     showNetworkQuality: true,
-    enableBeautyFilter: false, // Can be enabled for video calls
-    enableVirtualBackground: false, // Advanced feature
+    enableBeautyFilter: false,
+    enableVirtualBackground: false,
   },
 };
 
 // Feature flags
 export const FEATURE_FLAGS = {
-  ENABLE_CALL_RECORDING: false, // Call recording feature
-  ENABLE_SCREEN_SHARING: false, // Screen sharing in video calls
-  ENABLE_GROUP_CALLS: false, // Group therapy sessions
-  ENABLE_CALL_QUALITY_FEEDBACK: true, // Post-call quality feedback
-  ENABLE_NETWORK_QUALITY_INDICATOR: true, // Show network quality
-  ENABLE_CALL_INVITATION_PUSH: true, // Push notifications for calls
+  ENABLE_CALL_RECORDING: false,
+  ENABLE_SCREEN_SHARING: false,
+  ENABLE_GROUP_CALLS: false,
+  ENABLE_CALL_QUALITY_FEEDBACK: true,
+  ENABLE_NETWORK_QUALITY_INDICATOR: true,
+  ENABLE_CALL_INVITATION_PUSH: true,
 };
 
 // Development helpers
 export const DEV_CONFIG = {
   enableDebugLogs: __DEV__,
-  enableCallSimulation: __DEV__, // For testing without actual calls
-  mockCallDuration: 60, // Mock call duration for testing
+  enableCallSimulation: __DEV__,
+  mockCallDuration: 60,
   enablePerformanceMonitoring: true,
 };
+
+// Run validation on import
+validateZegoConfig();
 
 export default {
   ZEGO_APP_ID,
