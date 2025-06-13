@@ -1,4 +1,4 @@
-// src/screens/ModernZegoCallScreen.js
+// 1. Fixed ZegoCallScreen.js - BackHandler issue
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   View,
@@ -25,13 +25,33 @@ import unifiedZegoService from "../services/unifiedZegoService";
 import { CALL_TYPES, UI_CONFIG } from "../config/zegoConfig";
 import api from "../services/api";
 import socketService from "../services/socket";
-import { updateUserBalance } from "../store/authSlice";
+import { updateUserBalance, updateTherapistEarnings } from "../store/authSlice";
 
-export default function ModernZegoCallScreen({ route, navigation }) {
+// Polyfill for deprecated BackHandler.removeEventListener
+if (BackHandler && !BackHandler.removeEventListener) {
+  BackHandler.removeEventListener = (eventType, listener) => {
+    console.warn('BackHandler.removeEventListener is deprecated. Using modern remove() method.');
+    // This is a no-op since we can't remove without subscription reference
+  };
+}
+
+export default function ZegoCallScreen({ route, navigation }) {
   const {
+    // New format parameters
     callData,
-    userType = "user", // 'user' or 'therapist'
+    userType = "user",
     internalCallId,
+
+    // Legacy format parameters (for backward compatibility)
+    roomId,
+    callId,
+    userId,
+    userName,
+    isCaller = false,
+    zegoCallId,
+    callType = CALL_TYPES.VOICE,
+    therapistId,
+    therapistName,
   } = route.params;
 
   const { user, therapist } = useSelector((state) => state.auth);
@@ -42,31 +62,55 @@ export default function ModernZegoCallScreen({ route, navigation }) {
   const [isInitializing, setIsInitializing] = useState(true);
   const [error, setError] = useState(null);
   const [callParams, setCallParams] = useState(null);
-  const [networkQuality, setNetworkQuality] = useState("good");
   const [callStatus, setCallStatus] = useState("connecting");
 
-  // Refs for cleanup and state management
-  const appStateRef = useRef(AppState.currentState);
+  // Refs for cleanup
   const cleanupExecutedRef = useRef(false);
   const navigationExecutedRef = useRef(false);
+  const backHandlerRef = useRef(null);
 
-  // Initialize call when component mounts
+  // Initialize call and setup event listeners when component mounts
   useEffect(() => {
-    initializeCall();
+    let backHandlerSubscription = null;
+    let appStateSubscription = null;
 
-    // Setup app state and back handler
-    const appStateSubscription = AppState.addEventListener(
-      "change",
-      handleAppStateChange
-    );
-    const backHandler = BackHandler.addEventListener(
-      "hardwareBackPress",
-      handleBackPress
-    );
+    const setupEventListeners = async () => {
+      try {
+        // Initialize the call first
+        await initializeCall();
 
+        // Setup AppState listener
+        appStateSubscription = AppState.addEventListener(
+          "change",
+          handleAppStateChange
+        );
+
+        // Setup BackHandler
+        backHandlerSubscription = BackHandler.addEventListener(
+          "hardwareBackPress",
+          handleBackPress
+        );
+      } catch (error) {
+        console.error("Failed to setup event listeners:", error);
+        setError("Failed to initialize call: " + error.message);
+      }
+    };
+
+    setupEventListeners();
+
+    // Cleanup function
     return () => {
-      appStateSubscription?.remove();
-      backHandler.remove();
+      // Clean up AppState listener
+      if (appStateSubscription?.remove) {
+        appStateSubscription.remove();
+      }
+
+      // Clean up BackHandler
+      if (backHandlerSubscription?.remove) {
+        backHandlerSubscription.remove();
+      }
+
+      // Execute other cleanup tasks
       executeCleanup();
     };
   }, []);
@@ -75,7 +119,6 @@ export default function ModernZegoCallScreen({ route, navigation }) {
   useFocusEffect(
     useCallback(() => {
       return () => {
-        // Screen is being unfocused/unmounted
         if (!navigationExecutedRef.current) {
           executeCleanup();
         }
@@ -85,35 +128,63 @@ export default function ModernZegoCallScreen({ route, navigation }) {
 
   const initializeCall = async () => {
     try {
-      console.log("🚀 Initializing modern call screen");
+      console.log("🚀 Initializing ZegoCloud call screen");
+      console.log("Route params:", route.params);
 
       // Initialize ZegoCloud service
       await unifiedZegoService.initialize();
 
+      // Determine call parameters based on the format received
+      let finalCallData;
+      let finalUserType;
+      let finalInternalCallId;
+
+      if (callData) {
+        // New format
+        finalCallData = callData;
+        finalUserType = userType;
+        finalInternalCallId = internalCallId;
+      } else {
+        // Legacy format - convert to new format
+        finalCallData = {
+          zegoCallId: zegoCallId || roomId,
+          callType,
+          isInitiator: isCaller,
+          targetUserId: therapistId || userId,
+          targetUserName: therapistName || userName,
+        };
+        finalUserType = therapistId ? "therapist" : "user";
+        finalInternalCallId = callId;
+      }
+
       // Generate standardized call parameters
       const params = unifiedZegoService.generateCallParams(
         currentUser,
-        callData
+        finalCallData
       );
+
+      // Validate parameters
       unifiedZegoService.validateCallParams(params);
 
+      console.log("Generated call params:", params);
       setCallParams(params);
 
       // Start call tracking
       unifiedZegoService.startCall({
-        ...callData,
-        internalCallId,
-        userType,
-        participants: [currentUser],
+        ...finalCallData,
+        internalCallId: finalInternalCallId,
+        userType: finalUserType,
       });
 
       // Emit call start event via socket
-      socketService.emit("call-screen-joined", {
-        callId: internalCallId,
-        userId: currentUser.id,
-        userType,
-        zegoCallId: params.callID,
-      });
+      if (finalInternalCallId) {
+        socketService.emit("call-screen-joined", {
+          callId: finalInternalCallId,
+          userId: currentUser.id,
+          userType: finalUserType,
+          zegoCallId: params.callID,
+        });
+      }
 
       setIsInitializing(false);
       setCallStatus("ready");
@@ -127,21 +198,7 @@ export default function ModernZegoCallScreen({ route, navigation }) {
   };
 
   const handleAppStateChange = (nextAppState) => {
-    console.log(
-      "📱 App state changed:",
-      appStateRef.current,
-      "->",
-      nextAppState
-    );
-    appStateRef.current = nextAppState;
-
-    if (nextAppState === "background") {
-      // Handle background state - could pause video, etc.
-      console.log("🎬 App went to background during call");
-    } else if (nextAppState === "active") {
-      // Handle return to foreground
-      console.log("🎬 App returned to foreground during call");
-    }
+    console.log("📱 App state changed to:", nextAppState);
   };
 
   const handleBackPress = () => {
@@ -153,22 +210,21 @@ export default function ModernZegoCallScreen({ route, navigation }) {
   };
 
   const handleCallStart = () => {
-    console.log("📞 Call actually started (users connected)");
+    console.log("📞 Call started (users connected)");
     setCallStatus("active");
     unifiedZegoService.markCallAsStarted();
   };
 
   const handleUserJoin = (users) => {
-    console.log("👥 Users in call:", users);
-    if (!unifiedZegoService.getCurrentCall()?.started) {
+    console.log("👥 Users joined call:", users);
+    if (!unifiedZegoService.getCurrentCall()?.started && users.length > 0) {
       handleCallStart();
     }
   };
 
   const handleUserLeave = (users) => {
-    console.log("👋 User left, remaining:", users);
-    if (users.length === 0) {
-      // Last person left, end call
+    console.log("👋 User left call, remaining:", users);
+    if (users.length <= 1) {
       setTimeout(() => handleCallEnd("UserLeft"), 1000);
     }
   };
@@ -191,57 +247,62 @@ export default function ModernZegoCallScreen({ route, navigation }) {
         duration: duration || unifiedZegoService.getCallDuration(),
         cost: unifiedZegoService.calculateCallCost(
           duration || unifiedZegoService.getCallDuration(),
-          callData?.callType || CALL_TYPES.VOICE
+          callParams?.callType || CALL_TYPES.VOICE
         ),
       };
 
-      // Only process cost if call actually happened (duration > 0)
-      if (callResult.duration > 0 && internalCallId) {
-        await processCallEnd(callResult);
+      // Process call end if there's an internal call ID and actual duration
+      const finalInternalCallId = internalCallId || callId;
+      if (callResult.duration > 0 && finalInternalCallId) {
+        await processCallEnd(callResult, finalInternalCallId);
       }
 
       // Emit call end event
-      socketService.emit("call-ended", {
-        callId: internalCallId,
-        userId: currentUser.id,
-        userType,
-        duration: callResult.duration,
-        reason: callResult.reason,
-      });
+      if (finalInternalCallId) {
+        socketService.emit("call-ended", {
+          callId: finalInternalCallId,
+          userId: currentUser.id,
+          userType: userType || (therapist ? "therapist" : "user"),
+          duration: callResult.duration,
+          reason: callResult.reason,
+        });
+      }
 
       executeCleanup();
-
-      // Navigate back with result
       navigation.goBack();
     } catch (error) {
       console.error("❌ Error processing call end:", error);
-      // Still navigate back even if processing fails
       executeCleanup();
       navigation.goBack();
     }
   };
 
-  const processCallEnd = async (callResult) => {
+  const processCallEnd = async (callResult, callId) => {
     try {
-      console.log("💰 Processing call end with cost:", callResult);
+      console.log("💰 Processing call end with result:", callResult);
 
-      const response = await api.post(`/call/end/${internalCallId}`, {
-        endedBy: userType,
+      const response = await api.post(`/call/end/${callId}`, {
+        endedBy: userType || (therapist ? "therapist" : "user"),
         duration: callResult.duration,
         reason: callResult.reason,
         ...callResult.cost,
       });
 
-      // Update user balance if user (not therapist)
-      if (userType === "user" && response.data.newBalance !== undefined) {
+      // Update balance/earnings based on user type
+      if (user && response.data.newBalance !== undefined) {
         dispatch(updateUserBalance(response.data.newBalance));
         console.log("💰 User balance updated:", response.data.newBalance);
+      } else if (therapist && response.data.newEarnings !== undefined) {
+        dispatch(updateTherapistEarnings(response.data.newEarnings));
+        console.log(
+          "💰 Therapist earnings updated:",
+          response.data.newEarnings
+        );
       }
 
       console.log("✅ Call end processed successfully");
     } catch (error) {
       console.error("❌ Failed to process call end:", error);
-      // Don't throw - we still want to end the call UI
     }
   };
 
@@ -249,7 +310,6 @@ export default function ModernZegoCallScreen({ route, navigation }) {
     console.error("🚨 Call error:", { errorCode, message });
     setError(`Call error (${errorCode}): ${message}`);
 
-    // Auto-end call after error
     setTimeout(() => {
       handleCallEnd("Error", 0);
     }, 2000);
@@ -271,17 +331,16 @@ export default function ModernZegoCallScreen({ route, navigation }) {
   const getCallConfig = () => {
     if (!callParams) return null;
 
-    return unifiedZegoService.createCallConfig(
-      callData?.callType || CALL_TYPES.VOICE,
-      userType,
-      {
-        onCallEnd: handleCallEnd,
-        onUserJoin: handleUserJoin,
-        onUserLeave: handleUserLeave,
-        onCallStart: handleCallStart,
-        onError: handleCallError,
-      }
-    );
+    const finalCallType = callParams.callType || callType || CALL_TYPES.VOICE;
+    const finalUserType = userType || (therapist ? "therapist" : "user");
+
+    return unifiedZegoService.createCallConfig(finalCallType, finalUserType, {
+      onCallEnd: handleCallEnd,
+      onUserJoin: handleUserJoin,
+      onUserLeave: handleUserLeave,
+      onCallStart: handleCallStart,
+      onError: handleCallError,
+    });
   };
 
   // Error UI
@@ -325,29 +384,23 @@ export default function ModernZegoCallScreen({ route, navigation }) {
           <ActivityIndicator size="large" color="#fff" />
           <Text style={styles.loadingTitle}>Setting up call...</Text>
           <Text style={styles.loadingSubtitle}>
-            {callData?.callType === CALL_TYPES.VIDEO ? "📹 Video" : "🎤 Voice"}{" "}
+            {(callData?.callType || callType) === CALL_TYPES.VIDEO
+              ? "📹 Video"
+              : "🎤 Voice"}{" "}
             Call
           </Text>
-
-          {/* Network quality indicator */}
-          <View style={styles.networkIndicator}>
-            <Text style={styles.networkText}>Network: {networkQuality}</Text>
-            <View
-              style={[
-                styles.networkDot,
-                {
-                  backgroundColor:
-                    networkQuality === "good" ? "#4CAF50" : "#ff9800",
-                },
-              ]}
-            />
-          </View>
         </LinearGradient>
       </View>
     );
   }
 
   // Main call UI
+  const finalCallType = callParams.callType || callType || CALL_TYPES.VOICE;
+  const baseConfig =
+    finalCallType === CALL_TYPES.VIDEO
+      ? ONE_ON_ONE_VIDEO_CALL_CONFIG
+      : ONE_ON_ONE_VOICE_CALL_CONFIG;
+
   return (
     <View style={styles.container}>
       <StatusBar
@@ -360,9 +413,6 @@ export default function ModernZegoCallScreen({ route, navigation }) {
         <Text style={styles.statusText}>
           {callStatus === "active" ? "🔴 Live" : "🟡 Connecting..."}
         </Text>
-        <View style={styles.networkIndicator}>
-          <Text style={styles.networkText}>{networkQuality}</Text>
-        </View>
       </View>
 
       {/* ZegoCloud UI */}
@@ -373,10 +423,7 @@ export default function ModernZegoCallScreen({ route, navigation }) {
         userName={callParams.userName}
         callID={callParams.callID}
         config={{
-          // Merge base config with our enhanced config
-          ...(callData?.callType === CALL_TYPES.VIDEO
-            ? ONE_ON_ONE_VIDEO_CALL_CONFIG
-            : ONE_ON_ONE_VOICE_CALL_CONFIG),
+          ...baseConfig,
           ...getCallConfig(),
         }}
       />
@@ -384,6 +431,7 @@ export default function ModernZegoCallScreen({ route, navigation }) {
   );
 }
 
+// Styles remain the same...
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -394,9 +442,6 @@ const styles = StyleSheet.create({
     top: Platform.OS === "ios" ? 50 : StatusBar.currentHeight + 10,
     left: 20,
     right: 20,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
     zIndex: 1000,
   },
   statusText: {
@@ -407,24 +452,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 15,
-  },
-  networkIndicator: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(0,0,0,0.5)",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 15,
-  },
-  networkText: {
-    color: "#fff",
-    fontSize: 12,
-    marginRight: 6,
-  },
-  networkDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    alignSelf: "flex-start",
   },
   loadingContainer: {
     flex: 1,

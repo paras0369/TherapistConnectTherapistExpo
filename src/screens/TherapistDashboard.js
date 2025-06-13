@@ -75,11 +75,29 @@ export default function TherapistDashboard({ navigation }) {
       const socket = socketService.connect();
 
       socket.on("connect", () => {
-        console.log("Therapist socket connected:", socket.id);
-        socketService.emit("therapist-connect", {
-          therapistId: therapist.id,
-          therapistInfo: { name: therapist.name, email: therapist.email },
+        console.log("🔗 Therapist socket connected:", socket.id);
+        console.log("👨‍⚕️ Therapist data for registration:", {
+          id: therapist.id,
+          name: therapist.name,
+          email: therapist.email
         });
+        // Register immediately when connected
+        const registrationData = {
+          userID: therapist.id,
+          userType: "therapist",
+          userName: therapist.name,
+        };
+        console.log("📤 Registering therapist:", registrationData);
+        socketService.emit("register", registrationData);
+      });
+
+      socket.on("disconnect", (reason) => {
+        console.log("❌ Therapist socket disconnected, reason:", reason);
+      });
+
+      // Listen for registration confirmation
+      socketService.on("registered", (data) => {
+        console.log("✅ Therapist registered successfully:", data);
       });
 
       // Listen for incoming calls via socket only
@@ -101,18 +119,24 @@ export default function TherapistDashboard({ navigation }) {
       });
 
       return () => {
-        socketService.disconnect();
+        console.log("🧹 Cleaning up socket listeners");
+        socketService.off("incoming-call");
+        socketService.off("call-cancelled");
+        socketService.off("call-timeout");
+        socketService.off("registered");
+        // Don't disconnect the socket completely as it's shared
       };
     }
-  }, [therapist]);
+  }, [therapist?.id]); // Only depend on therapist ID, not the whole object
 
   const handleIncomingCall = (callData) => {
+    console.log("🔥 Processing incoming call:", callData);
     setIncomingCall({
-      userId: callData.userId,
-      userName: callData.userName || "User",
-      roomId: callData.roomId,
-      callId: callData.callId,
-      zegoCallId: callData.zegoCallId,
+      userId: callData.callerID,
+      userName: callData.callerName || "User",
+      roomId: callData.roomId || callData.callID,
+      callId: callData.callID,
+      zegoCallId: callData.zegoCallId || callData.callID,
       callType: callData.callType || CALL_TYPES.VOICE,
     });
     setShowCallModal(true);
@@ -258,49 +282,46 @@ export default function TherapistDashboard({ navigation }) {
 
     try {
       if (actionType === "accept") {
-        console.log("Accepting call with data:", {
+        console.log("✅ Therapist accepting call:", {
           callId,
           userId,
           roomId,
           zegoCallId,
           callType,
           userName,
-          therapist: therapist?.id,
+          therapistId: therapist?.id,
         });
 
-        // Notify backend via socket that call is accepted
-        socketService.emit("call-accepted", {
-          callId,
-          therapistId: therapist.id,
-          userId,
-          roomId,
+        // Notify backend via socket that call is accepted FIRST
+        socketService.emit("accept-call", {
+          callID: callId,
         });
 
-        // Join ZegoCloud room using the unified service
-        const roomInfo = await unifiedZegoService.joinRoom(
-          roomId,
-          therapist.id,
-          therapist.name,
-          true, // isTherapist
-          callType
+        // Small delay to ensure socket message is sent
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        // Prepare call data for the ZegoCallScreen
+        const callData = {
+          zegoCallId: zegoCallId || roomId,
+          callType,
+          isInitiator: false, // Therapist is not the initiator
+          targetUserId: userId,
+          targetUserName: userName,
+        };
+
+        console.log(
+          "🎬 Therapist navigating to call screen with data:",
+          callData
         );
-
-        console.log("Successfully joined ZegoCloud room:", roomInfo);
 
         // Navigate to the call screen
         navigation.navigate("ZegoCallScreen", {
-          roomId,
-          callId,
-          userId,
-          userName: userName || "User",
-          isCaller: false, // Therapist is the receiver
-          zegoCallId,
-          callType,
-          therapistId: therapist.id,
-          therapistName: therapist.name,
+          callData,
+          userType: "therapist",
+          internalCallId: callId,
         });
       } else if (actionType === "reject") {
-        console.log("Rejecting call:", {
+        console.log("❌ Therapist rejecting call:", {
           callId,
           therapistId: therapist.id,
           userId,
@@ -317,13 +338,11 @@ export default function TherapistDashboard({ navigation }) {
         Alert.alert("Call Rejected", "You have rejected the call.");
       }
     } catch (error) {
-      console.error(`Error during call ${actionType}:`, error);
+      console.error(`❌ Error during call ${actionType}:`, error);
       Alert.alert(
         "Call Error",
         `Failed to ${actionType} call: ${error.message}`
       );
-
-      // Reset the modal state on error
       setShowCallModal(false);
       setIncomingCall(null);
     }

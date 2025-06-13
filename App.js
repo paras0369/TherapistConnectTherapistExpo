@@ -57,6 +57,33 @@ function AppNavigator() {
           api.defaults.headers.common["Authorization"] = null;
           setInitialRoute("Login");
         }
+      } else if (storedToken && storedUserType === "therapist") {
+        api.defaults.headers.common["Authorization"] = `Bearer ${storedToken}`;
+
+        try {
+          const profileResponse = await api.get("/therapist/profile");
+          const therapistProfile = profileResponse.data.therapist;
+
+          store.dispatch(
+            setAuth({
+              token: storedToken,
+              userType: "therapist",
+              therapist: {
+                id: therapistProfile._id,
+                name: therapistProfile.name,
+                email: therapistProfile.email,
+                phoneNumber: therapistProfile.phoneNumber,
+                specialization: therapistProfile.specialization,
+                isAvailable: therapistProfile.isAvailable,
+              },
+            })
+          );
+          setInitialRoute("TherapistDashboard");
+        } catch (error) {
+          await store.dispatch(logout());
+          api.defaults.headers.common["Authorization"] = null;
+          setInitialRoute("Login");
+        }
       } else {
         await store.dispatch(logout());
         api.defaults.headers.common["Authorization"] = null;
